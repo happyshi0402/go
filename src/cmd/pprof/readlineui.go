@@ -34,6 +34,10 @@ type readlineUI struct {
 }
 
 func newReadlineUI() driver.UI {
+	// disable readline UI in dumb terminal. (golang.org/issue/26254)
+	if v := strings.ToLower(os.Getenv("TERM")); v == "" || v == "dumb" {
+		return nil
+	}
 	// test if we can use terminal.ReadLine
 	// that assumes operation in the raw mode.
 	oldState, err := terminal.MakeRaw(0)
@@ -97,7 +101,7 @@ func colorize(msg string) string {
 	return colorEscape + msg + colorResetEscape
 }
 
-// IsTerminal returns whether the UI is known to be tied to an
+// IsTerminal reports whether the UI is known to be tied to an
 // interactive terminal (as opposed to being redirected to a file).
 func (r *readlineUI) IsTerminal() bool {
 	const stdout = 1

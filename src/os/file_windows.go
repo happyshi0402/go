@@ -171,7 +171,8 @@ func openFileNolog(name string, flag int, perm FileMode) (*File, error) {
 }
 
 // Close closes the File, rendering it unusable for I/O.
-// It returns an error, if any.
+// On files that support SetDeadline, any pending I/O operations will
+// be canceled and return immediately with an error.
 func (file *File) Close() error {
 	if file == nil {
 		return ErrInvalid
@@ -355,13 +356,13 @@ func Symlink(oldname, newname string) error {
 	// '/' does not work in link's content
 	oldname = fromSlash(oldname)
 
-	// need the exact location of the oldname when its relative to determine if its a directory
+	// need the exact location of the oldname when it's relative to determine if it's a directory
 	destpath := oldname
 	if !isAbs(oldname) {
 		destpath = dirname(newname) + `\` + oldname
 	}
 
-	fi, err := Lstat(destpath)
+	fi, err := Stat(destpath)
 	isdir := err == nil && fi.IsDir()
 
 	n, err := syscall.UTF16PtrFromString(fixLongPath(newname))

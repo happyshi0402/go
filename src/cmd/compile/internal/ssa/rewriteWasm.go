@@ -3,11 +3,13 @@
 
 package ssa
 
+import "fmt"
 import "math"
 import "cmd/internal/obj"
 import "cmd/internal/objabi"
 import "cmd/compile/internal/types"
 
+var _ = fmt.Println   // in case not otherwise used
 var _ = math.MinInt8  // in case not otherwise used
 var _ = obj.ANOP      // in case not otherwise used
 var _ = objabi.GOROOT // in case not otherwise used
@@ -237,6 +239,8 @@ func rewriteValueWasm(v *Value) bool {
 		return rewriteValueWasm_OpLess8U_0(v)
 	case OpLoad:
 		return rewriteValueWasm_OpLoad_0(v)
+	case OpLocalAddr:
+		return rewriteValueWasm_OpLocalAddr_0(v)
 	case OpLsh16x16:
 		return rewriteValueWasm_OpLsh16x16_0(v)
 	case OpLsh16x32:
@@ -463,6 +467,8 @@ func rewriteValueWasm(v *Value) bool {
 		return rewriteValueWasm_OpWasmF64Mul_0(v)
 	case OpWasmI64Add:
 		return rewriteValueWasm_OpWasmI64Add_0(v)
+	case OpWasmI64AddConst:
+		return rewriteValueWasm_OpWasmI64AddConst_0(v)
 	case OpWasmI64And:
 		return rewriteValueWasm_OpWasmI64And_0(v)
 	case OpWasmI64Eq:
@@ -2494,6 +2500,20 @@ func rewriteValueWasm_OpLoad_0(v *Value) bool {
 	}
 	return false
 }
+func rewriteValueWasm_OpLocalAddr_0(v *Value) bool {
+	// match: (LocalAddr {sym} base _)
+	// cond:
+	// result: (LoweredAddr {sym} base)
+	for {
+		sym := v.Aux
+		_ = v.Args[1]
+		base := v.Args[0]
+		v.reset(OpWasmLoweredAddr)
+		v.Aux = sym
+		v.AddArg(base)
+		return true
+	}
+}
 func rewriteValueWasm_OpLsh16x16_0(v *Value) bool {
 	b := v.Block
 	_ = b
@@ -3688,34 +3708,17 @@ func rewriteValueWasm_OpNot_0(v *Value) bool {
 	}
 }
 func rewriteValueWasm_OpOffPtr_0(v *Value) bool {
-	// match: (OffPtr [0] ptr)
-	// cond:
-	// result: ptr
-	for {
-		if v.AuxInt != 0 {
-			break
-		}
-		ptr := v.Args[0]
-		v.reset(OpCopy)
-		v.Type = ptr.Type
-		v.AddArg(ptr)
-		return true
-	}
 	// match: (OffPtr [off] ptr)
-	// cond: off > 0
+	// cond:
 	// result: (I64AddConst [off] ptr)
 	for {
 		off := v.AuxInt
 		ptr := v.Args[0]
-		if !(off > 0) {
-			break
-		}
 		v.reset(OpWasmI64AddConst)
 		v.AuxInt = off
 		v.AddArg(ptr)
 		return true
 	}
-	return false
 }
 func rewriteValueWasm_OpOr16_0(v *Value) bool {
 	// match: (Or16 x y)
@@ -5070,7 +5073,7 @@ func rewriteValueWasm_OpWasmF64Add_0(v *Value) bool {
 	_ = typ
 	// match: (F64Add (F64Const [x]) (F64Const [y]))
 	// cond:
-	// result: (F64Const [f2i(i2f(x) + i2f(y))])
+	// result: (F64Const [auxFrom64F(auxTo64F(x) + auxTo64F(y))])
 	for {
 		_ = v.Args[1]
 		v_0 := v.Args[0]
@@ -5084,7 +5087,7 @@ func rewriteValueWasm_OpWasmF64Add_0(v *Value) bool {
 		}
 		y := v_1.AuxInt
 		v.reset(OpWasmF64Const)
-		v.AuxInt = f2i(i2f(x) + i2f(y))
+		v.AuxInt = auxFrom64F(auxTo64F(x) + auxTo64F(y))
 		return true
 	}
 	// match: (F64Add (F64Const [x]) y)
@@ -5114,7 +5117,7 @@ func rewriteValueWasm_OpWasmF64Mul_0(v *Value) bool {
 	_ = typ
 	// match: (F64Mul (F64Const [x]) (F64Const [y]))
 	// cond:
-	// result: (F64Const [f2i(i2f(x) * i2f(y))])
+	// result: (F64Const [auxFrom64F(auxTo64F(x) * auxTo64F(y))])
 	for {
 		_ = v.Args[1]
 		v_0 := v.Args[0]
@@ -5128,7 +5131,7 @@ func rewriteValueWasm_OpWasmF64Mul_0(v *Value) bool {
 		}
 		y := v_1.AuxInt
 		v.reset(OpWasmF64Const)
-		v.AuxInt = f2i(i2f(x) * i2f(y))
+		v.AuxInt = auxFrom64F(auxTo64F(x) * auxTo64F(y))
 		return true
 	}
 	// match: (F64Mul (F64Const [x]) y)
@@ -5207,6 +5210,43 @@ func rewriteValueWasm_OpWasmI64Add_0(v *Value) bool {
 		v.reset(OpWasmI64AddConst)
 		v.AuxInt = y
 		v.AddArg(x)
+		return true
+	}
+	return false
+}
+func rewriteValueWasm_OpWasmI64AddConst_0(v *Value) bool {
+	// match: (I64AddConst [0] x)
+	// cond:
+	// result: x
+	for {
+		if v.AuxInt != 0 {
+			break
+		}
+		x := v.Args[0]
+		v.reset(OpCopy)
+		v.Type = x.Type
+		v.AddArg(x)
+		return true
+	}
+	// match: (I64AddConst [off] (LoweredAddr {sym} [off2] base))
+	// cond: isU32Bit(off+off2)
+	// result: (LoweredAddr {sym} [off+off2] base)
+	for {
+		off := v.AuxInt
+		v_0 := v.Args[0]
+		if v_0.Op != OpWasmLoweredAddr {
+			break
+		}
+		off2 := v_0.AuxInt
+		sym := v_0.Aux
+		base := v_0.Args[0]
+		if !(isU32Bit(off + off2)) {
+			break
+		}
+		v.reset(OpWasmLoweredAddr)
+		v.AuxInt = off + off2
+		v.Aux = sym
+		v.AddArg(base)
 		return true
 	}
 	return false

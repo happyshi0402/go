@@ -260,7 +260,7 @@ var markComplete = make([]*Func, 0)
 // NewInterface takes ownership of the provided methods and may modify their types by setting
 // missing receivers. To compute the method set of the interface, Complete must be called.
 //
-// Deprecated: Use NewInterface2 instead which allows any (even non-defined) interface types
+// Deprecated: Use NewInterfaceType instead which allows any (even non-defined) interface types
 // to be embedded. This is necessary for interfaces that embed alias type names referring to
 // non-defined (literal) interface types.
 func NewInterface(methods []*Func, embeddeds []*Named) *Interface {
@@ -268,16 +268,16 @@ func NewInterface(methods []*Func, embeddeds []*Named) *Interface {
 	for i, t := range embeddeds {
 		tnames[i] = t
 	}
-	return NewInterface2(methods, tnames)
+	return NewInterfaceType(methods, tnames)
 }
 
-// NewInterface2 returns a new (incomplete) interface for the given methods and embedded types.
+// NewInterfaceType returns a new (incomplete) interface for the given methods and embedded types.
 // Each embedded type must have an underlying type of interface type (this property is not
 // verified for defined types, which may be in the process of being set up and which don't
 // have a valid underlying type yet).
-// NewInterface2 takes ownership of the provided methods and may modify their types by setting
+// NewInterfaceType takes ownership of the provided methods and may modify their types by setting
 // missing receivers. To compute the method set of the interface, Complete must be called.
-func NewInterface2(methods []*Func, embeddeds []Type) *Interface {
+func NewInterfaceType(methods []*Func, embeddeds []Type) *Interface {
 	typ := new(Interface)
 
 	if len(methods) == 0 && len(embeddeds) == 0 {
@@ -340,31 +340,26 @@ func (t *Interface) NumMethods() int { return len(t.allMethods) }
 // The methods are ordered by their unique Id.
 func (t *Interface) Method(i int) *Func { return t.allMethods[i] }
 
-// Empty returns true if t is the empty interface.
+// Empty reports whether t is the empty interface.
 func (t *Interface) Empty() bool { return len(t.allMethods) == 0 }
 
 // Complete computes the interface's method set. It must be called by users of
-// NewInterface after the interface's embedded types are fully defined and
-// before using the interface type in any way other than to form other types.
-// Complete returns the receiver.
+// NewInterfaceType and NewInterface after the interface's embedded types are
+// fully defined and before using the interface type in any way other than to
+// form other types. Complete returns the receiver.
 func (t *Interface) Complete() *Interface {
 	if t.allMethods != nil {
 		return t
 	}
 
+	// collect all methods
 	var allMethods []*Func
 	allMethods = append(allMethods, t.methods...)
 	for _, et := range t.embeddeds {
 		it := et.Underlying().(*Interface)
 		it.Complete()
-		for _, tm := range it.allMethods {
-			// Make a copy of the method and adjust its receiver type.
-			newm := *tm
-			newmtyp := *tm.typ.(*Signature)
-			newm.typ = &newmtyp
-			newmtyp.recv = NewVar(newm.pos, newm.pkg, "", t)
-			allMethods = append(allMethods, &newm)
-		}
+		// copy embedded methods unchanged (see issue #28282)
+		allMethods = append(allMethods, it.allMethods...)
 	}
 	sort.Sort(byUniqueMethodName(allMethods))
 
@@ -424,7 +419,7 @@ func (c *Chan) Elem() Type { return c.elem }
 type Named struct {
 	obj        *TypeName // corresponding declared object
 	underlying Type      // possibly a *Named during setup; never a *Named once set up completely
-	methods    []*Func   // methods declared for this type (not the method set of this type)
+	methods    []*Func   // methods declared for this type (not the method set of this type); signatures are type-checked lazily
 }
 
 // NewNamed returns a new named type for the given type name, underlying type, and associated methods.

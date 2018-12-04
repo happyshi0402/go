@@ -95,7 +95,7 @@ func (f *File) ParseGo(name string, src []byte) {
 		}
 	}
 	if !sawC {
-		error_(token.NoPos, `cannot find import "C"`)
+		error_(ast1.Package, `cannot find import "C"`)
 	}
 
 	// In ast2, strip the import "C" line.
@@ -191,6 +191,18 @@ func (f *File) saveExprs(x interface{}, context astContext) {
 		}
 	case *ast.CallExpr:
 		f.saveCall(x, context)
+	case *ast.GenDecl:
+		if x.Tok == token.CONST {
+			for _, spec := range x.Specs {
+				vs := spec.(*ast.ValueSpec)
+				if vs.Type == nil {
+					for _, name := range spec.(*ast.ValueSpec).Names {
+						consts[name.Name] = true
+					}
+				}
+			}
+		}
+
 	}
 }
 

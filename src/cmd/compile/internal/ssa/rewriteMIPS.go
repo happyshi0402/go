@@ -3,11 +3,13 @@
 
 package ssa
 
+import "fmt"
 import "math"
 import "cmd/internal/obj"
 import "cmd/internal/objabi"
 import "cmd/compile/internal/types"
 
+var _ = fmt.Println   // in case not otherwise used
 var _ = math.MinInt8  // in case not otherwise used
 var _ = obj.ANOP      // in case not otherwise used
 var _ = objabi.GOROOT // in case not otherwise used
@@ -213,6 +215,8 @@ func rewriteValueMIPS(v *Value) bool {
 		return rewriteValueMIPS_OpLess8U_0(v)
 	case OpLoad:
 		return rewriteValueMIPS_OpLoad_0(v)
+	case OpLocalAddr:
+		return rewriteValueMIPS_OpLocalAddr_0(v)
 	case OpLsh16x16:
 		return rewriteValueMIPS_OpLsh16x16_0(v)
 	case OpLsh16x32:
@@ -2510,6 +2514,20 @@ func rewriteValueMIPS_OpLoad_0(v *Value) bool {
 		return true
 	}
 	return false
+}
+func rewriteValueMIPS_OpLocalAddr_0(v *Value) bool {
+	// match: (LocalAddr {sym} base _)
+	// cond:
+	// result: (MOVWaddr {sym} base)
+	for {
+		sym := v.Aux
+		_ = v.Args[1]
+		base := v.Args[0]
+		v.reset(OpMIPSMOVWaddr)
+		v.Aux = sym
+		v.AddArg(base)
+		return true
+	}
 }
 func rewriteValueMIPS_OpLsh16x16_0(v *Value) bool {
 	b := v.Block

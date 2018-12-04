@@ -19,7 +19,11 @@ import (
 	"unsafe"
 )
 
+var testMemStatsCount int
+
 func TestMemStats(t *testing.T) {
+	testMemStatsCount++
+
 	// Make sure there's at least one forced GC.
 	GC()
 
@@ -35,6 +39,13 @@ func TestMemStats(t *testing.T) {
 	}
 	le := func(thresh float64) func(interface{}) error {
 		return func(x interface{}) error {
+			// These sanity tests aren't necessarily valid
+			// with high -test.count values, so only run
+			// them once.
+			if testMemStatsCount > 1 {
+				return nil
+			}
+
 			if reflect.ValueOf(x).Convert(reflect.TypeOf(thresh)).Float() < thresh {
 				return nil
 			}
@@ -154,6 +165,14 @@ func TestTinyAlloc(t *testing.T) {
 
 	if len(chunks) == N {
 		t.Fatal("no bytes allocated within the same 8-byte chunk")
+	}
+}
+
+func TestPhysicalMemoryUtilization(t *testing.T) {
+	got := runTestProg(t, "testprog", "GCPhys")
+	want := "OK\n"
+	if got != want {
+		t.Fatalf("expected %q, but got %q", want, got)
 	}
 }
 

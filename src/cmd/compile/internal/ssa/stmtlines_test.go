@@ -1,6 +1,7 @@
 package ssa_test
 
 import (
+	"cmd/internal/xcoff"
 	"debug/dwarf"
 	"debug/elf"
 	"debug/macho"
@@ -25,6 +26,10 @@ func open(path string) (*dwarf.Data, error) {
 		return fh.DWARF()
 	}
 
+	if fh, err := xcoff.Open(path); err == nil {
+		return fh.DWARF()
+	}
+
 	return nil, fmt.Errorf("unrecognized executable format")
 }
 
@@ -37,22 +42,6 @@ func must(err error) {
 type Line struct {
 	File string
 	Line int
-}
-
-type File struct {
-	lines []string
-}
-
-var fileCache = map[string]*File{}
-
-func (f *File) Get(lineno int) (string, bool) {
-	if f == nil {
-		return "", false
-	}
-	if lineno-1 < 0 || lineno-1 >= len(f.lines) {
-		return "", false
-	}
-	return f.lines[lineno-1], true
 }
 
 func TestStmtLines(t *testing.T) {
@@ -76,6 +65,9 @@ func TestStmtLines(t *testing.T) {
 		}
 		pkgname, _ := e.Val(dwarf.AttrName).(string)
 		if pkgname == "runtime" {
+			continue
+		}
+		if e.Val(dwarf.AttrStmtList) == nil {
 			continue
 		}
 		lrdr, err := dw.LineReader(e)

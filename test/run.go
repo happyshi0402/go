@@ -78,6 +78,7 @@ func main() {
 	// Disable parallelism if printing or if using a simulator.
 	if *verbose || len(findExecCmd()) > 0 {
 		*numParallel = 1
+		*runoutputLimit = 1
 	}
 
 	ratec = make(chan bool, *numParallel)
@@ -321,7 +322,7 @@ func goDirFiles(longdir string) (filter []os.FileInfo, err error) {
 	return
 }
 
-var packageRE = regexp.MustCompile(`(?m)^package (\w+)`)
+var packageRE = regexp.MustCompile(`(?m)^package ([\p{Lu}\p{Ll}\w]+)`)
 
 // If singlefilepkgs is set, each file is considered a separate package
 // even if the package names are the same.
@@ -354,8 +355,9 @@ func goDirPackages(longdir string, singlefilepkgs bool) ([][]string, error) {
 }
 
 type context struct {
-	GOOS   string
-	GOARCH string
+	GOOS     string
+	GOARCH   string
+	noOptEnv bool
 }
 
 // shouldTest looks for build tags in a source file and returns
@@ -375,10 +377,13 @@ func shouldTest(src string, goos, goarch string) (ok bool, whyNot string) {
 		if len(line) == 0 || line[0] != '+' {
 			continue
 		}
+		gcFlags := os.Getenv("GO_GCFLAGS")
 		ctxt := &context{
-			GOOS:   goos,
-			GOARCH: goarch,
+			GOOS:     goos,
+			GOARCH:   goarch,
+			noOptEnv: strings.Contains(gcFlags, "-N") || strings.Contains(gcFlags, "-l"),
 		}
+
 		words := strings.Fields(line)
 		if words[0] == "+build" {
 			ok := false
@@ -425,6 +430,10 @@ func (ctxt *context) match(name string) bool {
 		return true
 	}
 
+	if ctxt.noOptEnv && name == "gcflags_noopt" {
+		return true
+	}
+
 	if name == "test_run" {
 		return true
 	}
@@ -435,7 +444,7 @@ func (ctxt *context) match(name string) bool {
 func init() { checkShouldTest() }
 
 // goGcflags returns the -gcflags argument to use with go build / go run.
-// This must match the flags used for building the standard libary,
+// This must match the flags used for building the standard library,
 // or else the commands will rebuild any needed packages (like runtime)
 // over and over.
 func goGcflags() string {
@@ -550,6 +559,19 @@ func (t *test) run() {
 		}
 		args = args[1:]
 	}
+	if action == "errorcheck" {
+		found := false
+		for i, f := range flags {
+			if strings.HasPrefix(f, "-d=") {
+				flags[i] = f + ",ssa/check/on"
+				found = true
+				break
+			}
+		}
+		if !found {
+			flags = append(flags, "-d=ssa/check/on")
+		}
+	}
 
 	t.makeTempDir()
 	if !*keep {
@@ -616,6 +638,8 @@ func (t *test) run() {
 		t.err = fmt.Errorf("unimplemented action %q", action)
 
 	case "asmcheck":
+		// Compile Go file and match the generated assembly
+		// against a set of regexps in comments.
 		ops := t.wantedAsmOpcodes(long)
 		for _, env := range ops.Envs() {
 			cmdline := []string{"build", "-gcflags", "-S"}
@@ -640,6 +664,9 @@ func (t *test) run() {
 		return
 
 	case "errorcheck":
+		// Compile Go file.
+		// Fail if wantError is true and compilation was successful and vice versa.
+		// Match errors produced by gc against errors in comments.
 		// TODO(gri) remove need for -C (disable printing of columns in error messages)
 		cmdline := []string{goTool(), "tool", "compile", "-C", "-e", "-o", "a.o"}
 		// No need to add -dynlink even if linkshared if we're just checking for errors...
@@ -664,10 +691,11 @@ func (t *test) run() {
 		return
 
 	case "compile":
+		// Compile Go file.
 		_, t.err = compileFile(runcmd, long, flags)
 
 	case "compiledir":
-		// Compile all files in the directory in lexicographic order.
+		// Compile all files in the directory as packages in lexicographic order.
 		longdir := filepath.Join(cwd, t.goDirName())
 		pkgs, err := goDirPackages(longdir, singlefilepkgs)
 		if err != nil {
@@ -682,8 +710,9 @@ func (t *test) run() {
 		}
 
 	case "errorcheckdir", "errorcheckandrundir":
-		// errorcheck all files in lexicographic order
-		// useful for finding importing errors
+		// Compile and errorCheck all files in the directory as packages in lexicographic order.
+		// If errorcheckdir and wantError, compilation of the last package must fail.
+		// If errorcheckandrundir and wantError, compilation of the package prior the last must fail.
 		longdir := filepath.Join(cwd, t.goDirName())
 		pkgs, err := goDirPackages(longdir, singlefilepkgs)
 		if err != nil {
@@ -725,8 +754,10 @@ func (t *test) run() {
 		fallthrough
 
 	case "rundir":
-		// Compile all files in the directory in lexicographic order.
-		// then link as if the last file is the main package and run it
+		// Compile all files in the directory as packages in lexicographic order.
+		// In case of errorcheckandrundir, ignore failed compilation of the package before the last.
+		// Link as if the last file is the main package, run it.
+		// Verify the expected output.
 		longdir := filepath.Join(cwd, t.goDirName())
 		pkgs, err := goDirPackages(longdir, singlefilepkgs)
 		if err != nil {
@@ -763,6 +794,7 @@ func (t *test) run() {
 		}
 
 	case "build":
+		// Build Go file.
 		_, err := runcmd(goTool(), "build", goGcflags(), "-o", "a.exe", long)
 		if err != nil {
 			t.err = err
@@ -770,32 +802,44 @@ func (t *test) run() {
 
 	case "builddir", "buildrundir":
 		// Build an executable from all the .go and .s files in a subdirectory.
-		useTmp = true
+		// Run it and verify its output in the buildrundir case.
 		longdir := filepath.Join(cwd, t.goDirName())
 		files, dirErr := ioutil.ReadDir(longdir)
 		if dirErr != nil {
 			t.err = dirErr
 			break
 		}
-		var gos []os.FileInfo
-		var asms []os.FileInfo
+		var gos []string
+		var asms []string
 		for _, file := range files {
 			switch filepath.Ext(file.Name()) {
 			case ".go":
-				gos = append(gos, file)
+				gos = append(gos, filepath.Join(longdir, file.Name()))
 			case ".s":
-				asms = append(asms, file)
+				asms = append(asms, filepath.Join(longdir, file.Name()))
 			}
 
+		}
+		if len(asms) > 0 {
+			emptyHdrFile := filepath.Join(t.tempDir, "go_asm.h")
+			if err := ioutil.WriteFile(emptyHdrFile, nil, 0666); err != nil {
+				t.err = fmt.Errorf("write empty go_asm.h: %s", err)
+				return
+			}
+			cmd := []string{goTool(), "tool", "asm", "-gensymabis", "-o", "symabis"}
+			cmd = append(cmd, asms...)
+			_, err = runcmd(cmd...)
+			if err != nil {
+				t.err = err
+				break
+			}
 		}
 		var objs []string
 		cmd := []string{goTool(), "tool", "compile", "-e", "-D", ".", "-I", ".", "-o", "go.o"}
 		if len(asms) > 0 {
-			cmd = append(cmd, "-asmhdr", "go_asm.h")
+			cmd = append(cmd, "-asmhdr", "go_asm.h", "-symabis", "symabis")
 		}
-		for _, file := range gos {
-			cmd = append(cmd, filepath.Join(longdir, file.Name()))
-		}
+		cmd = append(cmd, gos...)
 		_, err := runcmd(cmd...)
 		if err != nil {
 			t.err = err
@@ -804,9 +848,7 @@ func (t *test) run() {
 		objs = append(objs, "go.o")
 		if len(asms) > 0 {
 			cmd = []string{goTool(), "tool", "asm", "-e", "-I", ".", "-o", "asm.o"}
-			for _, file := range asms {
-				cmd = append(cmd, filepath.Join(longdir, file.Name()))
-			}
+			cmd = append(cmd, asms...)
 			_, err = runcmd(cmd...)
 			if err != nil {
 				t.err = err
@@ -839,9 +881,10 @@ func (t *test) run() {
 			}
 		}
 
-	case "buildrun": // build binary, then run binary, instead of go run. Useful for timeout tests where failure mode is infinite loop.
+	case "buildrun":
+		// Build an executable from Go file, then run it, verify its output.
+		// Useful for timeout tests where failure mode is infinite loop.
 		// TODO: not supported on NaCl
-		useTmp = true
 		cmd := []string{goTool(), "build", goGcflags(), "-o", "a.exe"}
 		if *linkshared {
 			cmd = append(cmd, "-linkshared")
@@ -866,6 +909,9 @@ func (t *test) run() {
 		}
 
 	case "run":
+		// Run Go file if no special go command flags are provided;
+		// otherwise build an executable and run it.
+		// Verify the output.
 		useTmp = false
 		var out []byte
 		var err error
@@ -908,6 +954,8 @@ func (t *test) run() {
 		}
 
 	case "runoutput":
+		// Run Go file and write its output into temporary Go file.
+		// Run generated Go file and verify its output.
 		rungatec <- true
 		defer func() {
 			<-rungatec
@@ -943,6 +991,8 @@ func (t *test) run() {
 		}
 
 	case "errorcheckoutput":
+		// Run Go file and write its output into temporary Go file.
+		// Compile and errorCheck generated Go file.
 		useTmp = false
 		cmd := []string{goTool(), "run", goGcflags()}
 		if *linkshared {
@@ -1038,6 +1088,17 @@ func splitOutput(out string, wantAuto bool) []string {
 	return res
 }
 
+// errorCheck matches errors in outStr against comments in source files.
+// For each line of the source files which should generate an error,
+// there should be a comment of the form // ERROR "regexp".
+// If outStr has an error for a line which has no such comment,
+// this function will report an error.
+// Likewise if outStr does not have an error for a line which has a comment,
+// or if the error message does not match the <regexp>.
+// The <regexp> syntax is Perl but it's best to stick to egrep.
+//
+// Sources files are supplied as fullshort slice.
+// It consists of pairs: full path to source file and its base name.
 func (t *test) errorCheck(outStr string, wantAuto bool, fullshort ...string) (err error) {
 	defer func() {
 		if *verbose && err != nil {
@@ -1300,11 +1361,12 @@ const (
 
 var (
 	// Regexp to split a line in code and comment, trimming spaces
-	rxAsmComment = regexp.MustCompile(`^\s*(.*?)\s*(?:\/\/\s*(.+)\s*)?$`)
+	rxAsmComment = regexp.MustCompile(`^\s*(.*?)\s*(?://\s*(.+)\s*)?$`)
 
-	// Regexp to extract an architecture check: architecture name, followed by semi-colon,
-	// followed by a comma-separated list of opcode checks.
-	rxAsmPlatform = regexp.MustCompile(`(\w+)(/\w+)?(/\w*)?:(` + reMatchCheck + `(?:,` + reMatchCheck + `)*)`)
+	// Regexp to extract an architecture check: architecture name (or triplet),
+	// followed by semi-colon, followed by a comma-separated list of opcode checks.
+	// Extraneous spaces are ignored.
+	rxAsmPlatform = regexp.MustCompile(`(\w+)(/\w+)?(/\w*)?\s*:\s*(` + reMatchCheck + `(?:\s*,\s*` + reMatchCheck + `)*)`)
 
 	// Regexp to extract a single opcoded check
 	rxAsmCheck = regexp.MustCompile(reMatchCheck)

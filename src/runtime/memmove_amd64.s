@@ -25,6 +25,7 @@
 
 // +build !plan9
 
+#include "go_asm.h"
 #include "textflag.h"
 
 // func memmove(to, from unsafe.Pointer, n uintptr)
@@ -43,6 +44,8 @@ tail:
 	// registers before writing it back.  move_256through2048 on the other
 	// hand can be used only when the memory regions don't overlap or the copy
 	// direction is forward.
+	//
+	// BSR+branch table make almost all memmove/memclr benchmarks worse. Not worth doing.
 	TESTQ	BX, BX
 	JEQ	move_0
 	CMPQ	BX, $2
@@ -63,7 +66,6 @@ tail:
 	JBE	move_65through128
 	CMPQ	BX, $256
 	JBE	move_129through256
-	// TODO: use branch table and BSR to make this just a single dispatch
 
 	TESTB	$1, runtime·useAVXmemmove(SB)
 	JNZ	avxUnaligned
@@ -82,7 +84,7 @@ forward:
 	JLS	move_256through2048
 
 	// If REP MOVSB isn't fast, don't use it
-	CMPB	runtime·support_erms(SB), $1 // enhanced REP MOVSB/STOSB
+	CMPB	internal∕cpu·X86+const_offsetX86HasERMS(SB), $1 // enhanced REP MOVSB/STOSB
 	JNE	fwdBy8
 
 	// Check alignment

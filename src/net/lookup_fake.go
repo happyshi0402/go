@@ -19,7 +19,7 @@ func (*Resolver) lookupHost(ctx context.Context, host string) (addrs []string, e
 	return nil, syscall.ENOPROTOOPT
 }
 
-func (*Resolver) lookupIP(ctx context.Context, host string) (addrs []IPAddr, err error) {
+func (*Resolver) lookupIP(ctx context.Context, network, host string) (addrs []IPAddr, err error) {
 	return nil, syscall.ENOPROTOOPT
 }
 
@@ -49,4 +49,10 @@ func (*Resolver) lookupTXT(ctx context.Context, name string) (txts []string, err
 
 func (*Resolver) lookupAddr(ctx context.Context, addr string) (ptrs []string, err error) {
 	return nil, syscall.ENOPROTOOPT
+}
+
+// concurrentThreadsLimit returns the number of threads we permit to
+// run concurrently doing DNS lookups.
+func concurrentThreadsLimit() int {
+	return 500
 }

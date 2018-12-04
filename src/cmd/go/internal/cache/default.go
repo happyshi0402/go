@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 )
 
@@ -35,12 +34,14 @@ See golang.org to learn more about Go.
 // initDefaultCache does the work of finding the default cache
 // the first time Default is called.
 func initDefaultCache() {
-	dir := DefaultDir()
+	dir, showWarnings := defaultDir()
 	if dir == "off" {
 		return
 	}
 	if err := os.MkdirAll(dir, 0777); err != nil {
-		fmt.Fprintf(os.Stderr, "go: disabling cache (%s) due to initialization failure: %s\n", dir, err)
+		if showWarnings {
+			fmt.Fprintf(os.Stderr, "go: disabling cache (%s) due to initialization failure: %s\n", dir, err)
+		}
 		return
 	}
 	if _, err := os.Stat(filepath.Join(dir, "README")); err != nil {
@@ -50,7 +51,9 @@ func initDefaultCache() {
 
 	c, err := Open(dir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "go: disabling cache (%s) due to initialization failure: %s\n", dir, err)
+		if showWarnings {
+			fmt.Fprintf(os.Stderr, "go: disabling cache (%s) due to initialization failure: %s\n", dir, err)
+		}
 		return
 	}
 	defaultCache = c
@@ -59,52 +62,34 @@ func initDefaultCache() {
 // DefaultDir returns the effective GOCACHE setting.
 // It returns "off" if the cache is disabled.
 func DefaultDir() string {
+	dir, _ := defaultDir()
+	return dir
+}
+
+// defaultDir returns the effective GOCACHE setting.
+// It returns "off" if the cache is disabled.
+// The second return value reports whether warnings should
+// be shown if the cache fails to initialize.
+func defaultDir() (string, bool) {
 	dir := os.Getenv("GOCACHE")
 	if dir != "" {
-		return dir
+		return dir, true
 	}
 
 	// Compute default location.
-	// TODO(rsc): This code belongs somewhere else,
-	// like maybe ioutil.CacheDir or os.CacheDir.
-	switch runtime.GOOS {
-	case "windows":
-		dir = os.Getenv("LocalAppData")
-		if dir == "" {
-			// Fall back to %AppData%, the old name of
-			// %LocalAppData% on Windows XP.
-			dir = os.Getenv("AppData")
-		}
-		if dir == "" {
-			return "off"
-		}
-
-	case "darwin":
-		dir = os.Getenv("HOME")
-		if dir == "" {
-			return "off"
-		}
-		dir += "/Library/Caches"
-
-	case "plan9":
-		dir = os.Getenv("home")
-		if dir == "" {
-			return "off"
-		}
-		// Plan 9 has no established per-user cache directory,
-		// but $home/lib/xyz is the usual equivalent of $HOME/.xyz on Unix.
-		dir += "/lib/cache"
-
-	default: // Unix
-		// https://standards.freedesktop.org/basedir-spec/basedir-spec-latest.html
-		dir = os.Getenv("XDG_CACHE_HOME")
-		if dir == "" {
-			dir = os.Getenv("HOME")
-			if dir == "" {
-				return "off"
-			}
-			dir += "/.cache"
-		}
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return "off", true
 	}
-	return filepath.Join(dir, "go-build")
+	dir = filepath.Join(dir, "go-build")
+
+	// Do this after filepath.Join, so that the path has been cleaned.
+	showWarnings := true
+	switch dir {
+	case "/.cache/go-build":
+		// probably docker run with -u flag
+		// https://golang.org/issue/26280
+		showWarnings = false
+	}
+	return dir, showWarnings
 }

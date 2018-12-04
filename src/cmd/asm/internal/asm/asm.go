@@ -137,7 +137,7 @@ func (p *Parser) asmText(operands [][]lex.Token) {
 	// Bizarre syntax: $frameSize-argSize is two words, not subtraction.
 	// Both frameSize and argSize must be simple integers; only frameSize
 	// can be negative.
-	// The "-argSize" may be missing; if so, set it to obj.ArgsSizeUnknown.
+	// The "-argSize" may be missing; if so, set it to objabi.ArgsSizeUnknown.
 	// Parse left to right.
 	op := operands[next]
 	if len(op) < 2 || op[0].ScanToken != '$' {
@@ -304,6 +304,28 @@ func (p *Parser) asmPCData(operands [][]lex.Token) {
 		Pos:  p.pos(),
 		From: key,
 		To:   value,
+	}
+	p.append(prog, "", true)
+}
+
+// asmPCAlign assembles a PCALIGN pseudo-op.
+// PCALIGN $16
+func (p *Parser) asmPCAlign(operands [][]lex.Token) {
+	if len(operands) != 1 {
+		p.errorf("expect one operand for PCALIGN")
+		return
+	}
+
+	// Operand 0 must be an immediate constant.
+	key := p.address(operands[0])
+	if !p.validImmediate("PCALIGN", &key) {
+		return
+	}
+
+	prog := &obj.Prog{
+		Ctxt: p.ctxt,
+		As:   obj.APCALIGN,
+		From: key,
 	}
 	p.append(prog, "", true)
 }

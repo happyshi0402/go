@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net/http/httptrace"
 	"net/http/internal"
 	"net/textproto"
 	"reflect"
@@ -20,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"golang_org/x/net/http/httpguts"
+	"internal/x/net/http/httpguts"
 )
 
 // ErrLineTooLong is returned when reading request or response bodies
@@ -183,6 +184,9 @@ func (t *transferWriter) shouldSendChunkedRequestBody() bool {
 	if t.ContentLength >= 0 || t.Body == nil { // redundant checks; caller did them
 		return false
 	}
+	if t.Method == "CONNECT" {
+		return false
+	}
 	if requestMethodUsuallyLacksBody(t.Method) {
 		// Only probe the Request.Body for GET/HEAD/DELETE/etc
 		// requests, because it's only those types of requests
@@ -280,10 +284,13 @@ func (t *transferWriter) shouldSendContentLength() bool {
 	return false
 }
 
-func (t *transferWriter) WriteHeader(w io.Writer) error {
+func (t *transferWriter) writeHeader(w io.Writer, trace *httptrace.ClientTrace) error {
 	if t.Close && !hasToken(t.Header.get("Connection"), "close") {
 		if _, err := io.WriteString(w, "Connection: close\r\n"); err != nil {
 			return err
+		}
+		if trace != nil && trace.WroteHeaderField != nil {
+			trace.WroteHeaderField("Connection", []string{"close"})
 		}
 	}
 
@@ -297,9 +304,15 @@ func (t *transferWriter) WriteHeader(w io.Writer) error {
 		if _, err := io.WriteString(w, strconv.FormatInt(t.ContentLength, 10)+"\r\n"); err != nil {
 			return err
 		}
+		if trace != nil && trace.WroteHeaderField != nil {
+			trace.WroteHeaderField("Content-Length", []string{strconv.FormatInt(t.ContentLength, 10)})
+		}
 	} else if chunked(t.TransferEncoding) {
 		if _, err := io.WriteString(w, "Transfer-Encoding: chunked\r\n"); err != nil {
 			return err
+		}
+		if trace != nil && trace.WroteHeaderField != nil {
+			trace.WroteHeaderField("Transfer-Encoding", []string{"chunked"})
 		}
 	}
 
@@ -321,13 +334,16 @@ func (t *transferWriter) WriteHeader(w io.Writer) error {
 			if _, err := io.WriteString(w, "Trailer: "+strings.Join(keys, ",")+"\r\n"); err != nil {
 				return err
 			}
+			if trace != nil && trace.WroteHeaderField != nil {
+				trace.WroteHeaderField("Trailer", keys)
+			}
 		}
 	}
 
 	return nil
 }
 
-func (t *transferWriter) WriteBody(w io.Writer) error {
+func (t *transferWriter) writeBody(w io.Writer) error {
 	var err error
 	var ncopy int64
 
@@ -344,7 +360,11 @@ func (t *transferWriter) WriteBody(w io.Writer) error {
 				err = cw.Close()
 			}
 		} else if t.ContentLength == -1 {
-			ncopy, err = io.Copy(w, body)
+			dst := w
+			if t.Method == "CONNECT" {
+				dst = bufioFlushWriter{dst}
+			}
+			ncopy, err = io.Copy(dst, body)
 		} else {
 			ncopy, err = io.Copy(w, io.LimitReader(body, t.ContentLength))
 			if err != nil {
@@ -720,6 +740,16 @@ func fixTrailer(header Header, te []string) (Header, error) {
 	if !ok {
 		return nil, nil
 	}
+	if !chunked(te) {
+		// Trailer and no chunking:
+		// this is an invalid use case for trailer header.
+		// Nevertheless, no error will be returned and we
+		// let users decide if this is a valid HTTP message.
+		// The Trailer header will be kept in Response.Header
+		// but not populate Response.Trailer.
+		// See issue #27197.
+		return nil, nil
+	}
 	header.Del("Trailer")
 
 	trailer := make(Header)
@@ -742,10 +772,6 @@ func fixTrailer(header Header, te []string) (Header, error) {
 	}
 	if len(trailer) == 0 {
 		return nil, nil
-	}
-	if !chunked(te) {
-		// Trailer and no chunking
-		return nil, ErrUnexpectedTrailer
 	}
 	return trailer, nil
 }
@@ -929,7 +955,7 @@ func (b *body) Close() error {
 		// no trailer and closing the connection next.
 		// no point in reading to EOF.
 	case b.doEarlyClose:
-		// Read up to maxPostHandlerReadBytes bytes of the body, looking for
+		// Read up to maxPostHandlerReadBytes bytes of the body, looking
 		// for EOF (and trailers), so we can re-use this connection.
 		if lr, ok := b.src.(*io.LimitedReader); ok && lr.N > maxPostHandlerReadBytes {
 			// There was a declared Content-Length, and we have more bytes remaining
@@ -1036,4 +1062,19 @@ func isKnownInMemoryReader(r io.Reader) bool {
 		return isKnownInMemoryReader(reflect.ValueOf(r).Field(0).Interface().(io.Reader))
 	}
 	return false
+}
+
+// bufioFlushWriter is an io.Writer wrapper that flushes all writes
+// on its wrapped writer if it's a *bufio.Writer.
+type bufioFlushWriter struct{ w io.Writer }
+
+func (fw bufioFlushWriter) Write(p []byte) (n int, err error) {
+	n, err = fw.w.Write(p)
+	if bw, ok := fw.w.(*bufio.Writer); n > 0 && ok {
+		ferr := bw.Flush()
+		if ferr != nil && err == nil {
+			err = ferr
+		}
+	}
+	return
 }

@@ -56,17 +56,18 @@ func testMain(m *testing.M) int {
 
 func TestNonGoExecs(t *testing.T) {
 	testfiles := []string{
-		"elf/testdata/gcc-386-freebsd-exec",
-		"elf/testdata/gcc-amd64-linux-exec",
-		"macho/testdata/gcc-386-darwin-exec",
-		"macho/testdata/gcc-amd64-darwin-exec",
-		// "pe/testdata/gcc-amd64-mingw-exec", // no symbols!
-		"pe/testdata/gcc-386-mingw-exec",
-		"plan9obj/testdata/amd64-plan9-exec",
-		"plan9obj/testdata/386-plan9-exec",
+		"debug/elf/testdata/gcc-386-freebsd-exec",
+		"debug/elf/testdata/gcc-amd64-linux-exec",
+		"debug/macho/testdata/gcc-386-darwin-exec",
+		"debug/macho/testdata/gcc-amd64-darwin-exec",
+		// "debug/pe/testdata/gcc-amd64-mingw-exec", // no symbols!
+		"debug/pe/testdata/gcc-386-mingw-exec",
+		"debug/plan9obj/testdata/amd64-plan9-exec",
+		"debug/plan9obj/testdata/386-plan9-exec",
+		"cmd/internal/xcoff/testdata/gcc-ppc64-aix-dwarf2-exec",
 	}
 	for _, f := range testfiles {
-		exepath := filepath.Join(runtime.GOROOT(), "src", "debug", f)
+		exepath := filepath.Join(runtime.GOROOT(), "src", f)
 		cmd := exec.Command(testnmpath, exepath)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -126,10 +127,33 @@ func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 		names["main."+f[0]] = f[1]
 	}
 
+	runtimeSyms := map[string]string{
+		"runtime.text":      "T",
+		"runtime.etext":     "T",
+		"runtime.rodata":    "R",
+		"runtime.erodata":   "R",
+		"runtime.epclntab":  "R",
+		"runtime.noptrdata": "D",
+	}
+
 	out, err = exec.Command(testnmpath, exe).CombinedOutput()
 	if err != nil {
 		t.Fatalf("go tool nm: %v\n%s", err, string(out))
 	}
+
+	relocated := func(code string) bool {
+		if runtime.GOOS == "aix" {
+			// On AIX, .data and .bss addresses are changed by the loader.
+			// Therefore, the values returned by the exec aren't the same
+			// than the ones inside the symbol table.
+			switch code {
+			case "D", "d", "B", "b":
+				return true
+			}
+		}
+		return false
+	}
+
 	scanner := bufio.NewScanner(bytes.NewBuffer(out))
 	dups := make(map[string]bool)
 	for scanner.Scan() {
@@ -140,12 +164,24 @@ func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 		name := f[2]
 		if addr, found := names[name]; found {
 			if want, have := addr, "0x"+f[0]; have != want {
-				t.Errorf("want %s address for %s symbol, but have %s", want, name, have)
+				if !relocated(f[1]) {
+					t.Errorf("want %s address for %s symbol, but have %s", want, name, have)
+				}
 			}
 			delete(names, name)
 		}
 		if _, found := dups[name]; found {
 			t.Errorf("duplicate name of %q is found", name)
+		}
+		if stype, found := runtimeSyms[name]; found {
+			if runtime.GOOS == "plan9" && stype == "R" {
+				// no read-only data segment symbol on Plan 9
+				stype = "D"
+			}
+			if want, have := stype, strings.ToUpper(f[1]); have != want {
+				t.Errorf("want %s type for %s symbol, but have %s", want, name, have)
+			}
+			delete(runtimeSyms, name)
 		}
 	}
 	err = scanner.Err()
@@ -154,6 +190,9 @@ func testGoExec(t *testing.T, iscgo, isexternallinker bool) {
 	}
 	if len(names) > 0 {
 		t.Errorf("executable is missing %v symbols", names)
+	}
+	if len(runtimeSyms) > 0 {
+		t.Errorf("executable is missing %v symbols", runtimeSyms)
 	}
 }
 
